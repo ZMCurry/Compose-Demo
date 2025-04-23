@@ -114,24 +114,26 @@ public abstract class BaseStore<S : MVIState, I : MVIIntent, A : MVIAction>(
                         }
                     }
 
-                    // 根据最终结果执行操作
                     when (finalResult) {
                         is ExceptionHandlerResult.Handled -> {
                             publishEvent(StoreEvent.ExceptionCaught(e)) // 记录原始异常
                             println("Exception caught and handled by plugin: ${e.message}")
-                            // 不做任何事，继续运行
                         }
                         is ExceptionHandlerResult.DispatchIntent<*> -> {
-                            publishEvent(StoreEvent.ExceptionCaught(e))
+                            publishEvent(StoreEvent.ExceptionCaught(e)) // 记录原始异常
                             println("Exception handled, dispatching recovery intent: ${finalResult.intent}")
-                            // 需要类型转换，因为泛型是 out
-                            dispatchIntent(finalResult.intent as I)
+                            val recoveryIntent = finalResult.intent as I // 类型转换
+                            dispatchIntent(recoveryIntent)
+                            // 新增：记录恢复性 Intent 分发事件
+                            publishEvent(StoreEvent.RecoveryIntentDispatched(recoveryIntent))
                         }
                         is ExceptionHandlerResult.SendAction<*> -> {
-                            publishEvent(StoreEvent.ExceptionCaught(e))
+                            publishEvent(StoreEvent.ExceptionCaught(e)) // 记录原始异常
                             println("Exception handled, sending recovery action: ${finalResult.action}")
-                            // 需要类型转换
-                            actionChannel.send(finalResult.action as A)
+                            val recoveryAction = finalResult.action as A // 类型转换
+                            actionChannel.send(recoveryAction)
+                            // 新增：记录恢复性 Action 发送事件
+                            publishEvent(StoreEvent.RecoveryActionSent(recoveryAction))
                         }
                         is ExceptionHandlerResult.Rethrow -> {
                             publishEvent(StoreEvent.ExceptionCaught(finalResult.exception))

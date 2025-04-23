@@ -35,6 +35,12 @@ sealed class StoreEvent<out S : MVIState, out I : MVIIntent, out A : MVIAction>(
         val error: Throwable? = null
     ) : StoreEvent<S, I, A>()
 
+    data class RecoveryIntentDispatched<I : MVIIntent>(val intent: I) :
+        StoreEvent<Nothing, I, Nothing>()
+
+    /** An Action was sent as a result of handling an exception. */
+    data class RecoveryActionSent<A : MVIAction>(val action: A) : StoreEvent<Nothing, Nothing, A>()
+
     override fun toString(): String {
         return "${this::class.simpleName}(timestamp=$timestamp, data=${getDataString()})"
     }
@@ -46,5 +52,7 @@ sealed class StoreEvent<out S : MVIState, out I : MVIIntent, out A : MVIAction>(
         is ActionSent<*, *, *> -> "action=$action"
         is ExceptionCaught<*, *, *> -> "error=$error"
         is StoreStopped<*, *, *> -> "finalState=$finalState, error=$error"
+        is RecoveryActionSent<*> -> TODO()
+        is RecoveryIntentDispatched<*> -> TODO()
     }
 }
