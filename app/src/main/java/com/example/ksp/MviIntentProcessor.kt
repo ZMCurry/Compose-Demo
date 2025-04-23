@@ -1,0 +1,134 @@
+package com.example.ksp
+
+
+import com.google.devtools.ksp.processing.*
+import com.google.devtools.ksp.symbol.*
+import com.google.devtools.ksp.validate
+import com.squareup.kotlinpoet.*
+import com.squareup.kotlinpoet.ksp.*
+import java.io.OutputStream
+import java.io.OutputStreamWriter
+
+class MviIntentProcessor(
+    private val codeGenerator: CodeGenerator,
+    private val logger: KSPLogger
+) : SymbolProcessor {
+
+    private var processed = false
+    private val mviIntentQualifiedName = "pro.respawn.flowmvi.api.MVIIntent" // 确认 MVIIntent 的完全限定名
+    private val serializableQualifiedName = "kotlinx.serialization.Serializable"
+
+    override fun process(resolver: Resolver): List<KSAnnotated> {
+        if (processed) {
+            logger.info("Already processed MVIIntent subclasses.")
+            return emptyList()
+        }
+
+        val mviIntentDeclaration = resolver.getClassDeclarationByName(resolver.getKSNameFromString(mviIntentQualifiedName))
+        if (mviIntentDeclaration == null) {
+            logger.warn("$mviIntentQualifiedName type not found on classpath.")
+            return emptyList()
+        }
+        val mviIntentType = mviIntentDeclaration.asType(emptyList())
+
+
+        val serializableAnnotationName = resolver.getKSNameFromString(serializableQualifiedName)
+
+        logger.info("Searching for @Serializable subclasses of $mviIntentQualifiedName...")
+
+        val intentSubclasses = resolver.getAllFiles()
+            .flatMap { it.declarations }
+            .filterIsInstance<KSClassDeclaration>()
+            .filter { it.classKind == ClassKind.CLASS || it.classKind == ClassKind.OBJECT }
+            .filter { decl ->
+                // 检查是否直接或间接实现了 MVIIntent
+                decl.getAllSuperTypes().any { superType ->
+                    superType.isAssignableFrom(mviIntentType)
+                }
+            }
+            .filter { decl ->
+                // 检查是否有 @Serializable 注解
+                decl.annotations.any { annotation ->
+                    // 比较完全限定名以避免冲突
+                    annotation.annotationType.resolve().declaration.qualifiedName?.asString() == serializableQualifiedName
+                }
+            }
+            .filter { it.validate() }
+            .toList()
+
+        if (intentSubclasses.isNotEmpty()) {
+            logger.info("Found ${intentSubclasses.size} @Serializable MVIIntent subclasses: ${intentSubclasses.joinToString { it.simpleName.asString() }}")
+            generateModule(intentSubclasses, mviIntentDeclaration)
+            processed = true // 标记为已处理
+        } else {
+            logger.info("No @Serializable MVIIntent subclasses found to process.")
+            // 即使没找到，也标记为处理过，避免每次都搜索
+            processed = true
+        }
+
+        // 返回无法处理的符号（如果有的话），通常是空列表
+        return emptyList()
+    }
+
+    private fun generateModule(subclasses: List<KSClassDeclaration>, baseClass: KSClassDeclaration) {
+        val moduleName = "generatedMviIntentModule"
+        // 将生成的文件放在特定包下，避免冲突
+        val packageName = baseClass.packageName.asString() + ".generated.serialization"
+
+        val baseClassName = baseClass.toClassName()
+        val subclassClassNames = subclasses.mapNotNull {
+            // 确保能正确获取 ClassName
+            try { it.toClassName() } catch (e: Exception) { logger.error("Could not get ClassName for ${it.qualifiedName?.asString()}", it); null }
+        }
+
+        if (subclassClassNames.size != subclasses.size) {
+            logger.error("Some subclasses could not be resolved to ClassName. Aborting module generation.")
+            return
+        }
+
+        logger.info("Generating SerializersModule '$moduleName' in package '$packageName' for base class ${baseClassName.canonicalName}")
+
+        val serializersModuleCN = ClassName("kotlinx.serialization.modules", "SerializersModule")
+        val moduleProperty = PropertySpec.builder(moduleName, serializersModuleCN)
+            .addKdoc("Auto-generated [SerializersModule] for polymorphic serialization of [%T] subclasses.", baseClassName)
+            .initializer(
+                CodeBlock.builder()
+                    .beginControlFlow("%T", serializersModuleCN) // SerializersModule {
+                    .beginControlFlow("polymorphic(%T::class)", baseClassName) // polymorphic(Base::class) {
+                    .apply {
+                        subclassClassNames.forEach { subclassClassName ->
+                            addStatement("subclass(%T::class)", subclassClassName) // subclass(Sub::class)
+                            logger.info("  Registered subclass: ${subclassClassName.canonicalName}")
+                        }
+                    }
+                    .endControlFlow() // } (end polymorphic)
+                    .endControlFlow() // } (end SerializersModule)
+                    .build()
+            )
+            .build()
+
+        val fileSpec = FileSpec.builder(packageName, moduleName)
+            .addFileComment("Generated by MviIntentProcessor.kt. Do not edit manually!")
+            .addProperty(moduleProperty)
+            .build()
+
+        try {
+            // 使用 KSP 的 codeGenerator 创建文件
+            val file: OutputStream = codeGenerator.createNewFile(
+                // 依赖于所有找到的子类的源文件以及 MVIIntent 的源文件
+                dependencies = Dependencies(true, *subclasses.mapNotNull { it.containingFile }.toTypedArray(), baseClass.containingFile!!),
+                packageName = packageName,
+                fileName = moduleName
+            )
+            OutputStreamWriter(file, Charsets.UTF_8).use { writer -> // 指定 UTF-8 编码
+                fileSpec.writeTo(writer)
+                logger.info("Successfully generated $packageName/$moduleName.kt")
+            }
+        } catch (e: FileAlreadyExistsException) {
+            logger.warn("File $packageName.$moduleName already exists. Skipping generation in this round.")
+        } catch (e: Exception) {
+            logger.error("Error generating SerializersModule file: ${e.stackTraceToString()}", null)
+        }
+    }
+}
+```
