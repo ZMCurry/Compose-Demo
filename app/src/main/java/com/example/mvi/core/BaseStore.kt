@@ -1,5 +1,6 @@
 package com.example.mvi.core
 
+import com.example.mvi.ExceptionHandlerResult
 import com.example.mvi.api.MVIAction
 import com.example.mvi.api.MVIIntent
 import com.example.mvi.api.MVIState
@@ -93,20 +94,50 @@ public abstract class BaseStore<S : MVIState, I : MVIIntent, A : MVIAction>(
                     // ... 更新状态, 发送 action, 调用 plugin onStateChange/onAction ...
 
                 } catch (e: Exception) {
-                    // 调用插件的 onException
-                    // 注意：这里传递 this (Store 实例) 给插件，以便插件可以调用 dispatchIntent
-                    val handledError = runPluginsSafely(this@BaseStore) { plugin ->
-                        plugin.onException(e, this@BaseStore) // 传递 Store 实例
+                    var finalResult: ExceptionHandlerResult<I, A> = ExceptionHandlerResult.Rethrow(e) // 默认重抛
+
+                    // 遍历插件处理异常
+                    for (plugin in plugins) {
+                        try {
+                            val result = plugin.onException(e, this)
+                            // 如果有插件处理了（非 Rethrow），就采纳它的结果并停止遍历
+                            if (result !is ExceptionHandlerResult.Rethrow) {
+                                finalResult = result
+                                break // 第一个处理的插件优先
+                            } else {
+                                // 如果插件要求 Rethrow，更新要抛出的异常（可能被包装过）
+                                finalResult = result
+                            }
+                        } catch (pluginError: Exception) {
+                            println("Exception in plugin ${plugin.name} during onException: ${pluginError.message}")
+                            // 插件自身的错误不应阻止原始异常的处理，但需要记录
+                        }
                     }
 
-                    if (handledError != null) {
-                        publishEvent(StoreEvent.ExceptionCaught(handledError))
-                        println("Unhandled exception or plugin requested rethrow: ${handledError.message}")
-                        throw handledError
-                    } else {
-                        publishEvent(StoreEvent.ExceptionCaught(e))
-                        println("Exception caught and handled by plugin: ${e.message}")
-                        // 不再抛出异常，恢复流程可能已由插件通过 dispatchIntent 启动
+                    // 根据最终结果执行操作
+                    when (finalResult) {
+                        is ExceptionHandlerResult.Handled -> {
+                            publishEvent(StoreEvent.ExceptionCaught(e)) // 记录原始异常
+                            println("Exception caught and handled by plugin: ${e.message}")
+                            // 不做任何事，继续运行
+                        }
+                        is ExceptionHandlerResult.DispatchIntent<*> -> {
+                            publishEvent(StoreEvent.ExceptionCaught(e))
+                            println("Exception handled, dispatching recovery intent: ${finalResult.intent}")
+                            // 需要类型转换，因为泛型是 out
+                            dispatchIntent(finalResult.intent as I)
+                        }
+                        is ExceptionHandlerResult.SendAction<*> -> {
+                            publishEvent(StoreEvent.ExceptionCaught(e))
+                            println("Exception handled, sending recovery action: ${finalResult.action}")
+                            // 需要类型转换
+                            actionChannel.send(finalResult.action as A)
+                        }
+                        is ExceptionHandlerResult.Rethrow -> {
+                            publishEvent(StoreEvent.ExceptionCaught(finalResult.exception))
+                            println("Exception not handled or plugin requested rethrow: ${finalResult.exception.message}")
+                            throw finalResult.exception // 重新抛出异常
+                        }
                     }
                 }
             }

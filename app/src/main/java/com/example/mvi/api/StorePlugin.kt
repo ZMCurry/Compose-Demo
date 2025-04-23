@@ -1,5 +1,6 @@
 package com.example.mvi.api
 
+import com.example.mvi.ExceptionHandlerResult
 import kotlinx.coroutines.CoroutineScope
 
 /**
@@ -23,7 +24,9 @@ public interface StorePlugin<S : MVIState, I : MVIIntent, A : MVIAction> {
     public suspend fun onAction(action: A): A? = action
 
     /** Called when an exception occurs during intent processing or state reduction. Can handle or rethrow. */
-    suspend fun onException(e: Exception, store: Store<S, I, A>): Exception? { return e }
+    suspend fun onException(e: Exception, store: Store<S, I, A>): ExceptionHandlerResult<I, A> {
+        return ExceptionHandlerResult.Rethrow(e) // 默认行为：不处理，要求重新抛出
+    }
 
     /** Called when the Store is stopped (cancelled or completed). */
     public suspend fun onStop(error: Throwable?): Unit = Unit

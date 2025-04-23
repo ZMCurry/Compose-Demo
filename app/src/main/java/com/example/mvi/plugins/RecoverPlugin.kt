@@ -1,6 +1,7 @@
 package com.example.mvi.plugins
 
 
+import com.example.mvi.ExceptionHandlerResult
 import com.example.mvi.api.MVIAction
 import com.example.mvi.api.MVIIntent
 import com.example.mvi.api.MVIState
@@ -33,27 +34,23 @@ class RecoverPlugin<S : MVIState, I : MVIIntent, A : MVIAction>(
         storeScope = scope
     }
 
-    // 实现新的 onException 签名
-    override suspend fun onException(e: Exception, store: Store<S, I, A>): Exception? {
+    override suspend fun onException(e: Exception, store: Store<S, I, A>): ExceptionHandlerResult<I, A> {
         println("[$name] Caught exception: ${e.message}")
 
-        // 1. 尝试发送错误 Action (如果配置了)
-        onErrorAction?.invoke(e)?.let { errorAction ->
-            storeScope?.launch {
-                (store as? ActionPublisher<A>)?.actionChannel?.send(errorAction)
-                println("[$name] Sent error action: $errorAction")
-            }
+        // 优先尝试生成恢复 Intent
+        resetIntent?.let {
+            println("[$name] Handling exception by requesting DispatchIntent: $it")
+            return ExceptionHandlerResult.DispatchIntent(it)
         }
 
-        // 2. 尝试分发重置状态的 Intent (如果配置了) - 这就是恢复动作
-        resetIntent?.let { intentToDispatch ->
-            storeScope?.launch {
-                (store as? IntentDispatcher<I>)?.dispatchIntent(intentToDispatch)
-                println("[$name] Dispatched recovery intent: $intentToDispatch")
-            }
+        // 其次尝试生成错误 Action
+        onErrorAction?.invoke(e)?.let { action ->
+            println("[$name] Handling exception by requesting SendAction: $action")
+            return ExceptionHandlerResult.SendAction(action)
         }
 
-        // 返回 null 表示异常已被处理，Store 不应停止
-        return null
+        // 如果以上都没有配置，则标记为已处理（不重抛，但也不做恢复）
+        println("[$name] Handling exception by marking as Handled.")
+        return ExceptionHandlerResult.Handled
     }
 }
