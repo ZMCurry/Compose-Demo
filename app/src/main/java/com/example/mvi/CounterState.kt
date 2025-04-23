@@ -12,6 +12,8 @@ sealed interface CounterIntent : MVIIntent {
 
     // 新增：用于触发回放的 Intent
     data class ReplayIntents(val intentsToReplay: List<CounterIntent>) : CounterIntent
+
+    data object ResetStateIntent : CounterIntent
 }
 
 sealed interface CounterAction : MVIAction {

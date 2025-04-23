@@ -23,7 +23,7 @@ public interface StorePlugin<S : MVIState, I : MVIIntent, A : MVIAction> {
     public suspend fun onAction(action: A): A? = action
 
     /** Called when an exception occurs during intent processing or state reduction. Can handle or rethrow. */
-    public suspend fun onException(error: Throwable): Throwable? = error
+    suspend fun onException(e: Exception, store: Store<S, I, A>): Exception? { return e }
 
     /** Called when the Store is stopped (cancelled or completed). */
     public suspend fun onStop(error: Throwable?): Unit = Unit

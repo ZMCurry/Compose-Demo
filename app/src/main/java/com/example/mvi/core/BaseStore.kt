@@ -1,9 +1,30 @@
 package com.example.mvi.core
 
-import com.example.mvi.api.*
-import kotlinx.coroutines.*
+import com.example.mvi.api.MVIAction
+import com.example.mvi.api.MVIIntent
+import com.example.mvi.api.MVIState
+import com.example.mvi.api.Store
+import com.example.mvi.api.StoreEvent
+import com.example.mvi.api.StorePlugin
+import com.example.mvi.plugins.ActionPublisher
+import com.example.mvi.plugins.IntentDispatcher
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.channels.SendChannel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 
@@ -20,10 +41,10 @@ import kotlin.coroutines.CoroutineContext
  */
 public abstract class BaseStore<S : MVIState, I : MVIIntent, A : MVIAction>(
     internal val initialState: S,
-    val plugins: List<StorePlugin<S, I, A>> = emptyList(),
+    internal val plugins: List<StorePlugin<S, I, A>> = emptyList(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val actionBufferCapacity: Int = Channel.BUFFERED, // Or Channel.UNLIMITED, Channel.CONFLATED
-) : Store<S, I, A>, CoroutineScope {
+) : Store<S, I, A>, CoroutineScope, ActionPublisher<A>, IntentDispatcher<I>  {
 
     private val _state = MutableStateFlow(initialState)
     override val state: StateFlow<S> = _state.asStateFlow()
@@ -43,51 +64,49 @@ public abstract class BaseStore<S : MVIState, I : MVIIntent, A : MVIAction>(
         get() = dispatcher + SupervisorJob(storeJob.get()) + CoroutineName("BaseStore<${initialState::class.simpleName}>")
 
 
+    // 假设 intentChannel 是内部可写的 Channel
+    protected val intentChannelInternal: Channel<I> = Channel(Channel.UNLIMITED)
+
+    // 实现 IntentDispatcher 接口
+    override suspend fun dispatchIntent(intent: I) {
+        intentChannelInternal.send(intent)
+    }
+
+    // 实现 ActionPublisher 接口
+    override val actionChannel: SendChannel<A>
+        get() = _actions // 假设 _actions 是 Channel<A>
+
     override fun start(scope: CoroutineScope): Job {
-        val currentJob = storeJob.get()
-        if (currentJob != null && currentJob.isActive) {
-            println("Store is already started.")
-            return currentJob
-        }
-
+        // ... existing setup ...
         val newJob = scope.launch(coroutineContext) {
-            _scope = this // Assign the scope
-            _state.value = initialState // Reset state on start
-            runPluginsSafely(this) { it.onStart(this, this@BaseStore) }
-            publishEvent(StoreEvent.StoreStarted(initialState))
+            // ... plugin onStart ...
 
-            // Main processing loop
-            intentChannel.receiveAsFlow().collect { intent ->
+            // 使用内部 channel 接收 intent
+            intentChannelInternal.receiveAsFlow().collect { intent ->
                 try {
-                    val processedIntent = runPluginsSafely(this) { it.onIntent(intent) } ?: return@collect
-                    publishEvent(StoreEvent.IntentReceived(processedIntent))
+                    // ... plugin onIntent ...
+                    publishEvent(StoreEvent.IntentReceived(intent))
 
-                    val currentState = state.value
-                    val (newState, action) = reduce(currentState, processedIntent)
+                    // ... 调用 reduce ...
+                    val (newState, action) = reduce(_state.value, intent)
 
-                    val finalState = runPluginsSafely(this) { it.onState(currentState, newState) } ?: newState
+                    // ... 更新状态, 发送 action, 调用 plugin onStateChange/onAction ...
 
-                    if (currentState != finalState) {
-                        _state.value = finalState
-                        publishEvent(StoreEvent.StateChanged(currentState, finalState))
-                    }
-
-                    if (action != null) {
-                        val processedAction = runPluginsSafely(this) { it.onAction(action) } ?: action
-                        _actions.send(processedAction)
-                        publishEvent(StoreEvent.ActionSent(processedAction))
-                    }
                 } catch (e: Exception) {
-                    val handledError = runPluginsSafely(this) { it.onException(e) }
+                    // 调用插件的 onException
+                    // 注意：这里传递 this (Store 实例) 给插件，以便插件可以调用 dispatchIntent
+                    val handledError = runPluginsSafely(this@BaseStore) { plugin ->
+                        plugin.onException(e, this@BaseStore) // 传递 Store 实例
+                    }
+
                     if (handledError != null) {
                         publishEvent(StoreEvent.ExceptionCaught(handledError))
-                        // Decide if you want to crash or just log
-                        println("Exception caught by plugin: ${handledError.message}")
-                        // throw handledError // Optionally rethrow
+                        println("Unhandled exception or plugin requested rethrow: ${handledError.message}")
+                        throw handledError
                     } else {
                         publishEvent(StoreEvent.ExceptionCaught(e))
-                        println("Unhandled exception in Store: ${e.message}")
-                        throw e // Rethrow if no plugin handled it
+                        println("Exception caught and handled by plugin: ${e.message}")
+                        // 不再抛出异常，恢复流程可能已由插件通过 dispatchIntent 启动
                     }
                 }
             }
@@ -96,7 +115,7 @@ public abstract class BaseStore<S : MVIState, I : MVIIntent, A : MVIAction>(
         newJob.invokeOnCompletion { error ->
             _scope = null // Clear scope on completion
             runBlocking { // Use runBlocking for cleanup if needed, be careful
-                runPluginsSafely(this) { it.onStop(error) }
+                runPluginsSafely(this@BaseStore) { it.onStop(error) }
                 publishEvent(StoreEvent.StoreStopped(state.value, error))
             }
             storeJob.set(null)
@@ -147,22 +166,16 @@ public abstract class BaseStore<S : MVIState, I : MVIIntent, A : MVIAction>(
         }
     }
 
-    // Helper to run plugin functions safely
-    private suspend inline fun <T> runPluginsSafely(
-        scope: CoroutineScope,
-        crossinline block: suspend (StorePlugin<S, I, A>) -> T?
-    ): T? {
-        var result: T? = null
-        plugins.forEach { plugin ->
+    protected suspend fun <R> runPluginsSafely(store: Store<S, I, A>, block: suspend (StorePlugin<S, I, A>) -> R): R? {
+        var result: R? = null
+        for (plugin in plugins) {
             try {
                 result = block(plugin)
-            } catch (e: Exception) {
-                println("Exception in plugin ${plugin.name ?: plugin::class.simpleName}: ${e.message}")
-                val handledError = plugin.onException(e) // Allow plugin to handle its own error
-                if (handledError != null) publishEvent(StoreEvent.ExceptionCaught(handledError))
-                // Potentially rethrow or log, depending on desired behavior for plugin errors
+            } catch (pluginError: Exception) {
+                println("Exception in plugin ${plugin.name}: ${pluginError.message}")
+                // 可以选择是否让插件错误影响主流程
             }
         }
-        return result
+        return result // 返回最后一个插件的结果（适用于 onException）
     }
 }

@@ -1,5 +1,6 @@
 package com.example.mvi
 
+import com.example.mvi.CounterAction.*
 import com.example.mvi.api.*
 import com.example.mvi.core.BaseStore
 
@@ -9,11 +10,15 @@ class CounterStore(
     initialState = CounterState(),
     plugins = plugins
 ) {
-    override suspend fun reduce(currentState: CounterState, intent: CounterIntent): Pair<CounterState, CounterAction?> {
+    override suspend fun reduce(
+        currentState: CounterState,
+        intent: CounterIntent
+    ): Pair<CounterState, CounterAction?> {
         return when (intent) {
             is CounterIntent.Increment -> {
                 val newState = currentState.copy(count = currentState.count + 1)
-                val action = if (newState.count % 5 == 0) CounterAction.ShowToast("Count is a multiple of 5!") else null
+                val action =
+                    if (newState.count % 5 == 0) ShowToast("Count is a multiple of 5!") else null
                 newState to action
             }
 
@@ -33,7 +38,10 @@ class CounterStore(
                     // 调用 reduce 逻辑来计算下一个状态和动作
                     // 注意：这里我们直接调用 reduce 逻辑，而不是递归分发 intent
                     // 需要确保 reduce 是纯函数或处理好副作用
-                    val (nextState, nextAction) = reduceInternal(replayState, replayIntent) // 使用一个内部方法避免无限递归
+                    val (nextState, nextAction) = reduceInternal(
+                        replayState,
+                        replayIntent
+                    ) // 使用一个内部方法避免无限递归
                     replayState = nextState
                     if (nextAction != null) {
                         lastAction = nextAction // 只保留最后一个 Action，或者你可以收集所有 Action
@@ -48,22 +56,32 @@ class CounterStore(
             }
             // 如果有其他 Intent 类型，需要在这里添加 case
             // else -> currentState to null // 或者抛出异常
+            CounterIntent.ResetStateIntent -> {
+                println("Reducing ResetStateIntent: Resetting state to initial.")
+                initialState to ShowToast("State has been reset due to an error.") // 可以附带一个提示 Action
+            }
         } as Pair<CounterState, CounterAction?>
     }
 
     // 创建一个内部 reduce 方法，避免 ReplayIntents 无限递归调用 reduce
-    private suspend fun reduceInternal(currentState: CounterState, intent: CounterIntent): Pair<CounterState, CounterAction?> {
+    private suspend fun reduceInternal(
+        currentState: CounterState,
+        intent: CounterIntent
+    ): Pair<CounterState, CounterAction?> {
         return when (intent) {
             is CounterIntent.Increment -> {
                 val newState = currentState.copy(count = currentState.count + 1)
-                val action = if (newState.count % 5 == 0) CounterAction.ShowToast("Count is a multiple of 5!") else null
+                val action =
+                    if (newState.count % 5 == 0) ShowToast("Count is a multiple of 5!") else null
                 newState to action
             }
+
             is CounterIntent.Decrement -> {
                 currentState.copy(count = currentState.count - 1) to null
             }
             // ReplayIntents 不应该在 internal reduce 中处理
             is CounterIntent.ReplayIntents -> currentState to null // 或者抛出错误
+            CounterIntent.ResetStateIntent -> initialState to null
         }
     }
 }

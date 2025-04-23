@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.example.mvi.android.BaseMviViewModel
 import com.example.mvi.api.StorePlugin // 引入你的插件
 import com.example.mvi.plugins.EventRecorderPlugin // 引入你的插件
+import com.example.mvi.plugins.RecoverPlugin
 
 // 假设 CounterState, CounterIntent, CounterAction, CounterStore 已定义
 
@@ -29,6 +30,14 @@ class CounterViewModelFactory : ViewModelProvider.Factory {
         if (modelClass.isAssignableFrom(CounterViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
             // 确保将 eventRecorder 实例传入
+            val recoverPlugin = RecoverPlugin<CounterState, CounterIntent, CounterAction>(
+                // 传入重置 Intent
+                resetIntent = CounterIntent.ResetStateIntent,
+                // 仍然可以发送错误 Action
+                onErrorAction = { exception ->
+                    CounterAction.ShowToast("Error: ${exception.message ?: "Unknown error"}")
+                }
+            )
             return CounterViewModel(plugins = listOf(eventRecorder)) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
